@@ -1,51 +1,95 @@
-from urllib.parse import parse_qs
+import http.client
+import json
+import re
 
 
-def application(env, start_response):
-    html = """
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <title>%(title)s</title>
-    </head>
-    <body>
-        <p>%(text)s</p>
-    </body>
-    </html>
-    """
-    query_params = parse_qs(env['QUERY_STRING'])
-    response_body = html % {
-        'text': generate_page_text(query_params),
-        'title': generate_page_title(env['PATH_INFO']),
-    }
-    status = '200 OK'
-    response_headers = [
-        ('Content-Type', 'text/html'),
+class App:
+    def __init__(self):
+        self.handlers = {}
 
-    ]
-    start_response(status, response_headers)
-    return [response_body.encode('utf8')]
+    def __call__(self, environ, start_response):
+        url = environ['PATH_INFO']
+        method = environ['REQUEST_METHOD']
+
+        handler, url_args = self.get_handler(url, method)
+
+        status_code, extra_headers, response_content = handler(environ, url_args)
+        content_type = 'text/plain'
+        if not type(response_content) is str:
+            response_content = json.dumps(response_content)
+            content_type = 'text/json'
+
+        headers = {
+            'Content-Type': content_type,
+        }
+        headers.update(extra_headers)
+
+        start_response(
+            '%s %s' % (status_code, http.client.responses[status_code]),
+            list(headers.items()),
+        )
+        return [response_content.encode('utf-8')]
+
+    def get_handler(self, url, method):
+        handler = None
+        url_args = None
+
+        if not url.endswith('/'):
+            handler = App.no_trailing_slash_handler
+        else:
+            for url_regexp, (current_methods, current_handler) in self.handlers.items():
+                match = re.match(url_regexp, url)
+                if match is None:
+                    continue
+                url_args = match.groupdict()
+                handler = current_handler
+                break
+
+            if handler is None:
+                handler = App.not_found_handler
 
 
-def generate_page_text(query_params):
-    result_text = ''
-    if not query_params:
-        result_text = 'Я хочу увидеть параметры запроса!!'
-    else:
-        for key in query_params:
-            result_text += '<p>Я вижу параметр "'+\
-                           key+'", его значение равняется "'+\
-                           query_params[key][0]+'"</p>'
-    return result_text
+        return handler, url_args
+
+    def add_handler(self, url, methods=None):
+        methods = methods or ['GET']
+
+        def wrapper(handler):
+            self.handlers[url] = methods, handler
+        return wrapper
+
+    @staticmethod
+    def not_found_handler(environ, url_args):
+        response_content = 'Not found'
+        return 404, {}, response_content
+
+    @staticmethod
+    def not_allowed_handler(environ, url_args):
+        response_content = 'Not allowed'
+        return 405, {}, response_content
+
+    @staticmethod
+    def no_trailing_slash_handler(environ, url_args):
+        return (
+            301,
+            {'Location': '%s/' % environ['PATH_INFO']},
+            'Redirect to url with trainling slash'
+        )
 
 
-def generate_page_title(path_info):
-    routes_map = {
-        '/': 'Это главная страница',
-        '/about': 'Это страница "О нас"'
-    }
-    title = 'Я не знаю о такой странице, попробуйте ещё раз'
-    for key in routes_map:
-        if path_info == key or path_info == key+'/':
-            title = routes_map[key]
-    return title
+application = App()
+
+
+@application.add_handler(r'^/$', methods=['GET', 'POST'])
+def index_page_handler(environ, url_args):
+    return 200, {}, 'Index'
+
+
+@application.add_handler(r'^/info/$')
+def info_page_handler(environ, url_args):
+    return 200, {}, {'user_ip': environ['REMOTE_ADDR']}
+
+
+@application.add_handler(r'^/lessons/(?P<lesson_id>\d+)/$')
+def info_page_handler(environ, url_args):
+    return 200, {}, {'lesson_id': url_args['lesson_id']}
